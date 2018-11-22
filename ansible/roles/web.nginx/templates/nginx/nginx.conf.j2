@@ -1,0 +1,1268 @@
+user                  root;  ## Default: nobody
+
+daemon                off;
+
+# Default: 1
+worker_processes      auto;    # Default: 1
+# Default: (no value)
+# "worker_cpu_affinity" with "auto" is new in 1.9.10
+worker_cpu_affinity   auto;    ## Default: (no value)
+
+worker_rlimit_nofile  8192;
+
+# Required to be a log file to
+# allow Amplify to read
+error_log             /var/log/nginx/error.log warn;
+
+events {
+  # Determines how many clients will be served by each worker process.
+  # (Max clients = worker_connections * worker_processes)
+  # "Max clients" is also limited by the number of socket connections available on the system (~64k)
+  worker_connections    {{ nginx_worker_connections }};   ## Default: 1024
+
+  # essential for linux, optmized to serve many clients with each thread
+  use epoll;
+
+  # Accept as many connections as possible, after nginx gets notification about a new connection.
+  # May flood worker_connections, if that option is set too low.
+  multi_accept on;
+}
+
+http {
+  {% for sub_config_file_name in sub_config_file_names %}
+  include     {{ container_sub_config_path }}/{{ sub_config_file_name }};
+  {% endfor %}
+
+  default_type application/octet-stream;
+  log_format   main '$remote_addr - $remote_user [$time_local]  $status '
+    '"$request" $body_bytes_sent "$http_referer" '
+    '"$http_user_agent" "$http_x_forwarded_for"';
+
+  # For NGINX Amplify Agent
+  # https://github.com/nginxinc/nginx-amplify-doc/blob/master/amplify-guide.md#additional-nginx-metrics
+  log_format  main_ext  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for" '
+                          '"$host" sn="$server_name" '
+                          'rt=$request_time '
+                          'ua="$upstream_addr" us="$upstream_status" '
+                          'ut="$upstream_response_time" ul="$upstream_response_length" '
+                          'cs=$upstream_cache_status' ;
+  # Required to be a log file to
+  # allow Amplify to read
+  access_log  /var/log/nginx/access.log  main_ext;
+
+  # JSON format log for Loggly to parse
+  # `escape=json` is required
+  # http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format
+  log_format request_timing escape=json
+    '{ "time_local": "$time_local", '
+    '"remote_addr": "$remote_addr", '
+    '"remote_user": "$remote_user", '
+    '"request": "$request", '
+    '"status": $status, '
+    '"body_bytes_sent": $body_bytes_sent, '
+    '"request_time": $request_time, '
+    '"http_referrer": "$http_referer", '
+    '"http_user_agent": "$http_user_agent", '
+    '"http_x_forwarded_for": "$http_x_forwarded_for", '
+    '"request_id": "$request_id", '
+    '"upstream_connect_time": $upstream_connect_time, '
+    '"upstream_header_time": $upstream_header_time, '
+    '"upstream_response_time": $upstream_response_time, '
+    '"upstream_http_x_runtime": $upstream_http_x_runtime, '
+    '"upstream_http_x_request_queuing_time": $upstream_http_x_request_queuing_time, '
+    '"upstream_http_x_spacious_page_type_id": "$upstream_http_x_spacious_page_type_id", '
+    '"upstream_http_x_spacious_city_name": "$upstream_http_x_spacious_city_name", '
+    '"upstream_http_x_spacious_neighbourhood_name": "$upstream_http_x_spacious_neighbourhood_name", '
+    '"upstream_http_x_spacious_user_signed_in": "$upstream_http_x_spacious_user_signed_in", '
+    '"upstream_http_x_spacious_page_content_cell_cached": "$upstream_http_x_spacious_page_content_cell_cached", '
+    '"upstream_http_server_timing": "$upstream_http_server_timing"} '
+    ;
+
+
+  # http://www.codestance.com/tutorials-archive/nginx-tuning-for-best-performance-255
+  # copies data between one FD and other from within the kernel
+  # faster then read() + write()
+  sendfile            on;
+  # send headers in one peace, its better then sending them one by one
+  tcp_nopush          on;
+  # don't buffer data sent, good for small data bursts in real time
+  tcp_nodelay         on;
+
+  # No value for "unlimited"
+  # So use a large value
+  keepalive_requests 2147483647;
+  # server will close connection after this time
+  keepalive_timeout   900s;
+
+  # allow the server to close connection on non responding client, this will free up memory
+  reset_timedout_connection on;
+  # request timed out -- default 60
+  client_body_timeout 10;
+  # if client stop responding, free up memory -- default 60
+  send_timeout 5;
+
+  proxy_redirect          off;
+  proxy_connect_timeout   90;
+  proxy_send_timeout      90;
+  proxy_read_timeout      90;
+
+  # Config value copied from
+  # https://stackoverflow.com/questions/13894386/upstream-too-big-nginx-codeigniter
+  proxy_buffering           on;
+  # For header only
+  proxy_buffer_size         8k;
+  # Total 4 MB
+  proxy_buffers             256 16k;
+  # 2 x size specified in proxy_buffers
+  proxy_busy_buffers_size   32k;
+
+  # Use shm (ram disk like stuff?) for temp file path
+  proxy_temp_path           {{ nginx_proxy_temp_path }};
+
+
+  # http://www.revsys.com/12days/front-end-performance/
+  # https://www.digitalocean.com/community/tutorials/how-to-optimize-nginx-configuration
+  # https://www.scalescale.com/tips/nginx/how-to-configure-nginx-gzip-compression/
+  # https://github.com/h5bp/server-configs-nginx/blob/master/nginx.conf
+  gzip              on;
+  gzip_vary         on;
+  # Disable gzip for certain browsers.
+  gzip_disable "MSIE [1-6].(?!.*SV1)";
+  gzip_comp_level   2;
+  gzip_min_length   1000;
+  gzip_http_version 1.0;
+  # https://www.nginx.com/resources/admin-guide/compression-and-decompression/
+  # text/html is always compressed by HttpGzipModule
+  # http://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_types
+  gzip_proxied      expired no-cache no-store private auth;
+  gzip_types
+    application/atom+xml
+    application/javascript
+    application/json
+    application/ld+json
+    application/manifest+json
+    application/rss+xml
+    application/vnd.geo+json
+    application/vnd.ms-fontobject
+    application/x-font-ttf
+    application/x-web-app-manifest+json
+    application/xhtml+xml
+    application/xml
+    font/opentype
+    image/bmp
+    image/svg+xml
+    image/x-icon
+    text/cache-manifest
+    text/css
+    text/plain
+    text/vcard
+    text/vnd.rim.location.xloc
+    text/vtt
+    text/x-component
+    text/x-cross-domain-policy;
+  # make sure gzip does not lose large gzipped js or css files
+  gzip_buffers      8 32k;
+
+
+  # Brotli compression
+  # https://github.com/google/ngx_brotli
+  #
+  # Compression Level set to 4 according to
+  # https://www.voorhoede.nl/en/blog/static-site-implosion-with-brotli-and-gzip/
+  brotli on;
+  brotli_static on;
+  brotli_comp_level 4;
+  brotli_types
+    text/plain
+    text/javascript
+    text/css
+    text/xml
+    text/x-component
+    application/javascript
+    application/x-javascript
+    application/xml
+    application/json
+    application/xhtml+xml
+    application/rss+xml
+    application/atom+xml
+    application/x-font-ttf
+    application/vnd.ms-fontobject
+    image/svg+xml
+    image/x-icon
+    font/opentype;
+
+
+  # To allow large file upload (but not taking too much space for temp files)
+  # https://www.digitalocean.com/community/tutorials/how-to-optimize-nginx-configuration
+  # http://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size
+  # Default is "1m"
+  client_max_body_size        1024m;
+  # To avoid writing requests to temp file (which is slower) we set a larger value
+  # Default is "8k|16k"
+  # http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size
+  client_body_buffer_size     10m;
+  # To allow large cookies we set this to be bigger (then enough)
+  # Default is "1k"
+  client_header_buffer_size   64k;
+  # These buffer are allocated on demand
+  # So should be a rare case and can be set to much higher value
+  # Default is "4 8k"
+  # https://stackoverflow.com/questions/17524396/400-bad-request-request-header-or-cookie-too-large
+  # https://www.narga.net/how-to-solve-common-nginx-problems/
+  large_client_header_buffers 8 64k;
+
+
+  types_hash_max_size           {{ nginx_types_hash_max_size }};
+
+  underscores_in_headers        on;
+
+  server_names_hash_bucket_size 128; # this seems to be required for some vhosts
+
+
+  # Disable SSLv3(enabled by default since nginx 0.8.19) since it's less secure then TLS http://en.wikipedia.org/wiki/Secure_Sockets_Layer#SSL_3.0
+  ssl_protocols         TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;
+  # ciphers chosen for forward secrecy and compatibility
+  # https://raymii.org/s/tutorials/Strong_SSL_Security_On_nginx.html
+  # http://blog.ivanristic.com/2013/08/configuring-apache-nginx-and-openssl-for-forward-secrecy.html
+  #
+  # For TLS 1.3 ciphers use `openssl ciphers -s -tls1_3`
+  ssl_ciphers           "TLS13-AES-256-GCM-SHA384:TLS13-CHACHA20-POLY1305-SHA256:TLS13-AES-128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA:ECDHE-RSA-AES128-SHA:ECDHE-RSA-DES-CBC3-SHA:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-SHA256:DHE-RSA-AES128-SHA256:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:EDH-RSA-DES-CBC3-SHA:AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA256:AES128-SHA256:AES256-SHA:AES128-SHA:DES-CBC3-SHA:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!MD5:!PSK:!RC4:!kRSA";
+
+  # Enables server-side protection from BEAST attacks
+  # http://blog.ivanristic.com/2013/09/is-beast-still-a-threat.html
+  #
+  # `ssl_session_timeout`: longer = larger cache =
+  # once compromised you lose too much info = kills forward secrecy
+  # shorter = kills = more full handshake = kills performance
+  # According to
+  # https://github.com/mozilla/server-side-tls/issues/198#issuecomment-327402827
+  # It really depends on gut feeling
+  # But no recommended to have > 24h
+  #
+  # ssl_session_cache is set to relatively small value
+  # Since expired sessions are not deleted when expired,
+  # but only overwritten by new sessions
+  ssl_prefer_server_ciphers on;
+  ssl_session_cache         shared:SSL:50m;
+  ssl_session_timeout       4h;
+
+  # Default 16k
+  # Change to a smaller value for better TTFB
+  # 1400 bytes to fit in one MTU
+  # See https://github.com/igrigorik/istlsfastyet.com/blob/master/nginx/nginx.conf#L15
+  # ssl_buffer_size 1400;
+
+  # Enable Dynamic TLS Record Sizing
+  # Feature brought by Nginx patch from CloudFlare
+  # https://blog.cloudflare.com/optimizing-tls-over-tcp-to-reduce-latency/
+  ssl_dyn_rec_enable on;
+
+  # Since this implementation of TLS Session Resumption
+  # sends the state of sever to client, it's dnagerous to be used
+  #
+  # References
+  # https://timtaubert.de/blog/2014/10/deploying-tls-the-hard-way/
+  # https://timtaubert.de/blog/2014/11/the-sad-state-of-server-side-tls-session-resumption-implementations/
+  ssl_session_tickets       off;
+
+  # Enables OCSP Stapling (mechanism by which a site can convey certificate revocation information to visitors in a privacy-preserving, scalable manner)
+  # http://blog.mozilla.org/security/2013/07/29/ocsp-stapling-in-firefox/
+  ssl_stapling        on;
+  ssl_stapling_verify on;
+  resolver            8.8.8.8 8.8.4.4 valid=300s;
+  resolver_timeout    10s;
+
+  # Enables Perfect Forward Secrecy
+  # https://t37.net/a-poodle-proof-bulletproof-nginx-ssl-configuration.html
+  ssl_dhparam     {{ nginx_ssl_dhparam_file_path }};
+  # secp521r1 not used due to compatibility
+  # https://community.letsencrypt.org/t/how-to-get-an-a-rating-on-qualys-ssl-labs-with-nginx-without-breaking-loads-of-browsers/4582/17
+  ssl_ecdh_curve  {{ nginx_ssl_ecdh_curve }};
+
+
+  geoip2 {{ container_geoip2_path }}/{{ geoip2_country_db_file_name }} {
+      $geoip2_data_country_code default=US country iso_code;
+      $geoip2_data_country_name country names en;
+  }
+
+
+
+  # === PageSpeed === #
+
+  # Needs to exist and be writable by nginx.  Use tmpfs for best performance.
+  pagespeed FileCachePath               {{ container_nginx_pagespeed_file_cache_path }};
+  pagespeed FileCacheSizeKb             {{ gateway_nginx_pagespeed_file_cache_size_in_kilobyte }};
+  pagespeed FileCacheCleanIntervalMs    {{ gateway_nginx_pagespeed_file_cache_clean_interval_ms }};
+  pagespeed FileCacheInodeLimit         {{ gateway_nginx_pagespeed_file_cache_inode_limit }};
+
+  # in-memory LRU Cache
+  pagespeed LRUCacheKbPerProcess     8192;
+  pagespeed LRUCacheByteLimit        16384;
+
+  pagespeed Domain http://d1u2yuyp83sxp9.cloudfront.net;
+  pagespeed Domain http://cdn.spacious.cn;
+  pagespeed Domain http://cdn-staging.spacious.hk;
+  pagespeed Domain http://cdn.spacious.hk;
+  pagespeed Domain https://d1u2yuyp83sxp9.cloudfront.net;
+  pagespeed Domain https://cdn.spacious.cn;
+  pagespeed Domain https://cdn-staging.spacious.hk;
+  pagespeed Domain https://cdn.spacious.hk;
+
+  # Disallow optimization for uploaded resources until
+  # some issues fixed
+  pagespeed Disallow "*/uploads/*";
+
+  # Disabllow optimization for static JS
+  # Screwing up caching
+  pagespeed Disallow "*/assets/*.js";
+  pagespeed Disallow "*/packs/*.js";
+
+  # Disabllow optimization for static JS
+  # Screwing up caching
+  pagespeed Disallow "*/assets/*.css";
+
+  pagespeed StatisticsPath /ngx_pagespeed_statistics;
+  pagespeed GlobalStatisticsPath /ngx_pagespeed_global_statistics;
+  pagespeed AdminPath /pagespeed_admin;
+  pagespeed GlobalAdminPath /pagespeed_global_admin;
+
+  pagespeed UsePerVhostStatistics on;
+  pagespeed MessageBufferSize 100000;
+
+  # Fetch original resources with Gzip when possible
+  pagespeed FetchWithGzip on;
+
+  # === PageSpeed === #
+
+  map "$http_user_agent" $is_google_page_speed {
+      default 0;
+      "~Google Page Speed Insights" 1;
+  }
+
+  map "$http_user_agent" $is_google_bot {
+      default 0;
+      "~Googlebot" 1;
+  }
+
+  map "$is_google_page_speed$is_google_bot" $access_log_enabled {
+      default 0;
+      10 1;
+      01 1;
+  }
+
+
+  # For security reasons
+  # We DO NOT show the Nginx version
+  #
+  # Config reference:
+  # http://nginx.org/en/docs/http/ngx_http_core_module.html#server_tokens
+  server_tokens   off;
+
+  # One time only something campaign
+  server {
+    listen 80;
+
+    server_name discuss-com-widget-2015-09.spacious.hk;
+
+    location / {
+      resolver 8.8.8.8 8.8.4.4 valid=300s;
+
+      proxy_pass http://attorney-ant-17483.bitballoon.com/;
+
+      proxy_cache_valid 200 5m;
+
+      proxy_set_header  Host attorney-ant-17483.bitballoon.com;
+    }
+  }
+  server {
+    listen 80;
+
+    server_name discuss-com-widget-2015-09-staging.spacious.hk;
+
+    location / {
+      resolver 8.8.8.8 8.8.4.4 valid=300s;
+
+      proxy_pass http://attorney-ant-17483.bitballoon.com/;
+
+      proxy_cache_valid 200 5m;
+
+      proxy_set_header  Host attorney-ant-17483.bitballoon.com;
+    }
+  }
+
+
+  # For Nginx Amplify
+  # https://github.com/nginxinc/nginx-amplify-doc/blob/master/amplify-guide.md#metrics-from-stub_status
+  server {
+    listen 127.0.0.1:80;
+    server_name 127.0.0.1;
+
+    location /nginx_status {
+      pagespeed off;
+
+      stub_status on;
+      allow 127.0.0.1;
+      deny all;
+    }
+  }
+
+
+  # For DataDog
+  server {
+    listen 81;
+    server_name {{ app_preferred_internal_connection_host | default(ansible_host) }};
+
+    pagespeed off;
+
+    access_log off;
+
+    location /nginx_status {
+      stub_status;
+    }
+  }
+
+
+  {% for mapping in ssl_cert_filename_to_server_name_mappings %}
+
+  {% set upstream_name = mapping.server_name | replace('.', '_dot_') | replace(' ', '_') | replace('*', 'star') %}
+  upstream {{ upstream_name }} {
+    server {{ app_preferred_internal_connection_host | default(ansible_host) }}:{{ web_load_balancer_docker_container_http_port }};
+
+    # Too lazy to calculate based on request per second & average response time
+    keepalive 1000;
+
+    keepalive_requests 2147483647;
+    # server will close connection after this time
+    keepalive_timeout   900s;
+  }
+
+  server {
+    {% if loop.index == 1 %}
+
+    # reuseport increases performance
+    # http://nginx.com/blog/socket-sharding-nginx-release-1-9-1/
+    # Note: Can only be specified once per IP Port pair
+    listen        80 fastopen=256 reuseport;
+
+    {% else %}
+
+    listen        80;
+
+    {% endif %}
+
+    server_name {{ mapping.server_name }};
+
+
+    # === PageSpeed === #
+    #
+    # https://modpagespeed.com/doc/configuration
+
+    {# Don't pass anything in `default` to get false #}
+    {# https://dddpaul.github.io/blog/2015/11/30/ansible-default-and-bool-filters/ #}
+    {% if (mapping.pagespeed_enabled | default() | bool) %}
+
+    pagespeed on;
+
+    {% else %}
+
+    pagespeed off;
+
+    {% endif %}
+
+    # Ensure requests for pagespeed optimized resources go to the pagespeed handler
+    # and no extraneous headers get set.
+    location ~ "\.pagespeed\.([a-z]\.)?[a-z]{2}\.[^.]{10}\.[^.]+" {
+      add_header "" "";
+    }
+    location ~ "^/pagespeed_static/" { }
+    location ~ "^/ngx_pagespeed_beacon$" { }
+
+    # Ensure relative URLs not to be rewritten to absolute URLs
+    pagespeed PreserveUrlRelativity on;
+
+    # Better performance with lowercase keywords in HTML
+    pagespeed LowercaseHtmlNames on;
+
+    # Remove extra whitespaces in HTML documents
+    # Safe to be turned on as long as CSS property `white-space` unused
+    pagespeed EnableFilters collapse_whitespace;
+
+    # Change
+    # <button name="ok" disabled="disabled">
+    # to
+    # <button name="ok" disabled>
+    pagespeed EnableFilters elide_attributes;
+
+    # Add resource preloading HTTP headers
+    #
+    # Spec: http://w3c.github.io/preload/
+    # Browser Support: http://caniuse.com/#search=preload
+    #
+    # It never works
+    # https://github.com/pagespeed/ngx_pagespeed/issues/1408
+    pagespeed ForbidFilters hint_preload_subresources;
+
+    # Add DNS prefetch tags
+    #
+    # Sometimes not working
+    # https://github.com/pagespeed/ngx_pagespeed/issues/541
+    pagespeed EnableFilters insert_dns_prefetch;
+
+    # Remove unnecessary quotes
+    pagespeed EnableFilters remove_quotes;
+
+    # Trim absolute URLs to relative URLs if possible
+    # Disabled since might have some risks
+    # (not quite worth it compared to benefit)
+    #
+    # pagespeed EnableFilters trim_urls;
+
+    # Change style tag with @import only
+    # To link tags
+    # Useful for blog maybe, main website don't have any though
+    #
+    pagespeed EnableFilters inline_import_to_link;
+
+    # Disable rewriting (mostly minification) CSS
+    # since we already does minification
+    # and this filter will change caching period to `max-age=300,private`
+    #
+    pagespeed ForbidFilters rewrite_css;
+
+    # Disable rewriting (mostly minification) JS
+    # since we already does minification
+    # and this filter will change caching period to `max-age=300,private`
+    #
+    pagespeed ForbidFilters rewrite_javascript_external;
+
+    # Disable combining JS
+    # since we already does that in assets pipeline
+    # and this filter will change caching period to `max-age=300,private`
+    pagespeed ForbidFilters combine_javascript;
+
+    # Minifying inline JS is fine since no caching involved
+    pagespeed EnableFilters rewrite_javascript_inline;
+
+    # From original description in
+    # https://modpagespeed.com/doc/filter-css-rewrite
+    #
+    # The CSS parser cannot parse some CSS3 or proprietary CSS extensions.
+    # If fallback_rewrite_css_urls is not enabled,
+    # these CSS files will not be rewritten at all.
+    # If the fallback_rewrite_css_urls filter is enabled,
+    # a fallback method will attempt to rewrite the URLs in the CSS file,
+    # even if the CSS cannot be successfully parsed and minified.
+    #
+    pagespeed ForbidFilters fallback_rewrite_css_urls;
+
+    # Enable rewriting style attribute for image urls
+    #
+    # Disable to allow preloading via HTTP header
+    pagespeed ForbidFilters rewrite_style_attributes_with_url;
+
+    # Flatten @import in CSS files
+    #
+    pagespeed EnableFilters flatten_css_imports;
+
+    # Inline content of small CSS files into HTML
+    #
+    pagespeed EnableFilters inline_css;
+
+    # Inline content of small JS files into HTML
+    #
+    pagespeed EnableFilters inline_javascript;
+
+    # Move CSS tags above script tags
+    # Faster rendering
+    #
+    pagespeed EnableFilters move_css_above_scripts;
+
+    # Remove HTML comments
+    # Except Internet Explorer conditional comments
+    #
+    pagespeed EnableFilters remove_comments;
+
+    # 'Extend Cache' seeks to improve the cacheability of a web page's resources
+    # without compromising the ability of site owners to change the resources and
+    # have those changes propagate to users' browsers.
+    #
+    pagespeed EnableFilters extend_cache_images;
+    pagespeed EnableFilters extend_cache_css;
+    # Got issue with responding with correct encoding
+    pagespeed ForbidFilters extend_cache_scripts;
+
+    # Convert images into formats with better performance
+    #
+    pagespeed EnableFilters convert_jpeg_to_progressive;
+    pagespeed EnableFilters convert_jpeg_to_webp;
+    pagespeed EnableFilters convert_png_to_jpeg;
+    pagespeed EnableFilters convert_to_webp_animated;
+    pagespeed EnableFilters convert_to_webp_lossless;
+    pagespeed EnableFilters inline_images;
+    pagespeed EnableFilters inline_preview_images;
+    pagespeed EnableFilters resize_mobile_images;
+    pagespeed EnableFilters recompress_jpeg;
+    pagespeed EnableFilters recompress_png;
+    pagespeed EnableFilters recompress_webp;
+    pagespeed EnableFilters jpeg_subsampling;
+    pagespeed EnableFilters resize_images;
+    pagespeed EnableFilters strip_image_color_profile;
+    pagespeed EnableFilters strip_image_meta_data;
+
+    # Set s-maxage for unoptimized resources
+    # 86400s = 24 hours = 1 day
+    pagespeed InPlaceSMaxAgeSec 86400;
+
+    # Disable CSS combine since it rewrites protocol relative URLs to HTTP only
+    pagespeed ForbidFilters combine_css;
+
+    # === PageSpeed === #
+
+
+    # === Custom Error Pages === #
+    error_page 500 /error_pages/500.html;
+    error_page 502 503 504 =503 /error_pages/503.html;
+
+    location = /error_pages/500.html {
+      alias {{ container_error_page_dir_path }}/{{ error_page_for_500_file_name }};
+      internal;
+    }
+    location = /error_pages/503.html {
+      # Tell client to retry after 1 hour = 3600 seconds
+      # https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.37
+      add_header Retry-After 3600 always;
+      alias {{ container_error_page_dir_path }}/{{ error_page_for_503_file_name }};
+      internal;
+    }
+
+    # Respond code >= 300 = intercepted for `error_page`
+    proxy_intercept_errors on;
+    # === Custom Error Pages === #
+
+
+    # === Ping Pong === #
+    # For measuring delay of transmission between gateway Nginx & client
+    location = /ping {
+      pagespeed off;
+
+      return 204;
+    }
+    # === Ping Pong === #
+
+
+    # === User Info === #
+    location ~ ^/my_country_code {
+      pagespeed off;
+      default_type application/json;
+      charset utf-8;
+      return 200 '{"country_code":"$geoip2_data_country_code"}';
+    }
+    # === User Info === #
+
+
+    # Blog
+    ## Rewrite blog URL with uppercase locale to lowercase
+    location ~ ^/zh-TW/blog.*$ {
+        rewrite ^/zh-TW/([^.]*)$ /zh-tw/$1 permanent;
+    }
+    location ~ ^/zh-CN/blog.*$ {
+        rewrite ^/zh-CN/([^.]*)$ /zh-cn/$1 permanent;
+    }
+
+
+    {% for extra_location in mapping.extra_locations %}
+
+    location {{ extra_location.location }} {
+
+        {% if extra_location.enforce_https %}
+
+          # Only enforce HTTPS for non China
+          {% if (region | default('')) == "CN" %}
+
+          # Nothing
+
+          {% elif (region | default('')) == "HK_B" %}
+
+          return 301 https://$host$request_uri;
+
+          {% elif (region | default('')) == "HK" %}
+
+          return 301 https://$host$request_uri;
+
+          {% endif %}
+
+        {% endif %}
+
+
+        {% if extra_location.location_handing_method == "proxy_pass" %}
+
+        # Try to avoid stale DNS answer
+        # http://stackoverflow.com/questions/17685674/nginx-proxy-pass-with-remote-addr
+        resolver            8.8.8.8 8.8.4.4 valid=300s;
+
+        proxy_pass {{ extra_location.proxy_pass | mandatory }};
+
+        proxy_redirect  http://$proxy_host/   /;
+        proxy_redirect  https://$proxy_host/  /;
+
+        # DO NOT set the host or strange redirect will occur
+        proxy_set_header        X-Scheme            $scheme;
+        proxy_set_header        X-Forwarded-Proto   $scheme;
+        proxy_set_header        X-Forwarded-For     $proxy_add_x_forwarded_for;
+
+        {% for http_header in extra_location.extra_headers_to_proxy %}
+
+        proxy_set_header {{ http_header.name }} {{ http_header.value }};
+
+        {% endfor %}
+
+        {% endif %}
+
+
+        {% if extra_location.location_handing_method == "redirect" %}
+
+        {{ extra_location.redirect_rule }}
+
+        {% endif %}
+
+
+        {# These headers are set regardless of `location_handing_method` #}
+        {% for http_header in extra_location.extra_headers_to_requester %}
+
+        add_header {{ http_header.name }} {{ http_header.value }};
+
+        {% endfor %}
+
+
+        {% if extra_location.custom_expiry_config_value %}
+
+        expires {{ extra_location.custom_expiry_config_value }};
+
+        {% endif %}
+    }
+
+    {% endfor %}
+
+
+    # pass requests for dynamic content to rails
+    {% if mapping.app_backend_enabled %}
+
+    location / {
+      {% if app_backend_enabled %}
+
+      ### case insensitive http user agent blocking ###
+      if ($http_user_agent ~* (scrapy) ) {
+        # Close connection without response
+        return 444;
+      }
+
+      # Try to use `app_preferred_internal_connection_host`, which is host specific and optional
+      # The value of `app_preferred_internal_connection_host` should contain
+      # something that causes less bandwidth usage
+      #
+      # Fallback to `ansible_host` which is required for using Ansible
+      proxy_pass      http://{{ upstream_name }};
+
+      proxy_set_header        Host              $host;
+      proxy_set_header        X-Real-IP         $remote_addr;
+      proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
+      proxy_set_header        X-Forwarded-Proto $scheme;
+      proxy_set_header        X-Forwarded-Port  $server_port;
+      proxy_set_header        X-GeoIP2-Country-Code $geoip2_data_country_code;
+
+      {% if (region | default('')) == "CN" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code CN;
+
+      {% elif (region | default('')) == "HK_B" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% elif (region | default('')) == "HK" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% elif (region | default('')) == "google_cloud_asia-east2-c" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% endif %}
+
+      # For tracking services like NewRelic & Scout
+      # No harm adding it
+      proxy_set_header        X-Request-Start "t=${msec}";
+
+      # Make app server use the same request ID
+      proxy_set_header X-Request-ID $request_id;
+
+      # Allow keep-alive connection with upstream server(s)
+      #
+      # See
+      # https://stackoverflow.com/questions/10395807/nginx-close-upstream-connection-after-request
+      # http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive
+      proxy_http_version        1.1;
+      proxy_set_header          Connection "";
+
+      # For security reason
+      # We DO NOT want to send the library version in header
+      proxy_hide_header X-Powered-By;
+
+
+      # Timing Tracking
+      add_header  X-Upstream-Connect-Time $upstream_connect_time;
+      add_header  X-Upstream-Header-Time  $upstream_header_time;
+
+
+      # Logging
+      {% if (nginx_force_enable_access_log | default() | bool) %}
+      access_log syslog:server=127.0.0.1 request_timing;
+      # Set internal header to enable access log in app server
+      proxy_set_header X-Spacious-App-Access-Log-Enabled 1;
+      {% else %}
+      access_log syslog:server=127.0.0.1 request_timing if=$access_log_enabled;
+      # Set internal header to enable access log in app server
+      proxy_set_header X-Spacious-App-Access-Log-Enabled $access_log_enabled;
+      {% endif %}
+
+
+      {% else %}
+
+      return 503;
+
+      {% endif %}
+    }
+
+    {% endif %}
+  }
+
+  server {
+    {% if loop.index == 1 %}
+
+    # reuseport increases performance
+    # http://nginx.com/blog/socket-sharding-nginx-release-1-9-1/
+    # Note: Can only be specified once per IP Port pair
+    listen        443 ssl http2 fastopen=256 reuseport;
+
+    {% else %}
+
+    listen        443 ssl http2;
+
+    {% endif %}
+
+    {% if mapping.ssl_cert_filename %}
+
+    ssl_certificate      {{ container_ssl_certs_path }}/{{ mapping.ssl_cert_filename }};
+    ssl_certificate_key  {{ container_ssl_certs_path }}/{{ mapping.ssl_cert_filename }};
+
+    # TLS 1.3 0-RTT
+    # Subject to replay attacks
+    ssl_early_data on;
+
+    {% endif %}
+
+    server_name {{ mapping.server_name }};
+
+
+    # Only enforce HTTP for China
+    {% if (region | default('')) == "CN" %}
+
+    return 301 http://$host$request_uri;
+
+    {% elif (region | default('')) == "HK_B" %}
+
+    # Nothing
+
+    {% elif (region | default('')) == "HK" %}
+
+    # Nothing
+
+    {% endif %}
+
+
+    # === PageSpeed === #
+    #
+    # https://modpagespeed.com/doc/configuration
+
+    {# Don't pass anything in `default` to get false #}
+    {# https://dddpaul.github.io/blog/2015/11/30/ansible-default-and-bool-filters/ #}
+    {% if (mapping.pagespeed_enabled | default() | bool) %}
+
+    pagespeed on;
+
+    {% else %}
+
+    pagespeed off;
+
+    {% endif %}
+
+    # Ensure requests for pagespeed optimized resources go to the pagespeed handler
+    # and no extraneous headers get set.
+    location ~ "\.pagespeed\.([a-z]\.)?[a-z]{2}\.[^.]{10}\.[^.]+" {
+      add_header "" "";
+    }
+    location ~ "^/pagespeed_static/" { }
+    location ~ "^/ngx_pagespeed_beacon$" { }
+
+    # Ensure relative URLs not to be rewritten to absolute URLs
+    pagespeed PreserveUrlRelativity on;
+
+    # Better performance with lowercase keywords in HTML
+    pagespeed LowercaseHtmlNames on;
+
+    # Remove extra whitespaces in HTML documents
+    # Safe to be turned on as long as CSS property `white-space` unused
+    pagespeed EnableFilters collapse_whitespace;
+
+    # Change
+    # <button name="ok" disabled="disabled">
+    # to
+    # <button name="ok" disabled>
+    pagespeed EnableFilters elide_attributes;
+
+    # Add resource preloading HTTP headers
+    #
+    # Spec: http://w3c.github.io/preload/
+    # Browser Support: http://caniuse.com/#search=preload
+    #
+    # It never works
+    # https://github.com/pagespeed/ngx_pagespeed/issues/1408
+    pagespeed ForbidFilters hint_preload_subresources;
+
+    # Add DNS prefetch tags
+    #
+    # Sometimes not working
+    # https://github.com/pagespeed/ngx_pagespeed/issues/541
+    pagespeed EnableFilters insert_dns_prefetch;
+
+    # Remove unnecessary quotes
+    pagespeed EnableFilters remove_quotes;
+
+    # Trim absolute URLs to relative URLs if possible
+    # Disabled since might have some risks
+    # (not quite worth it compared to benefit)
+    #
+    # pagespeed EnableFilters trim_urls;
+
+    # Change style tag with @import only
+    # To link tags
+    # Useful for blog maybe, main website don't have any though
+    #
+    pagespeed EnableFilters inline_import_to_link;
+
+    # Disable rewriting (mostly minification) CSS
+    # since we already does minification
+    # and this filter will change caching period to `max-age=300,private`
+    #
+    pagespeed ForbidFilters rewrite_css;
+
+    # Disable rewriting (mostly minification) JS
+    # since we already does minification
+    # and this filter will change caching period to `max-age=300,private`
+    #
+    pagespeed ForbidFilters rewrite_javascript_external;
+
+    # Disable combining JS
+    # since we already does that in assets pipeline
+    # and this filter will change caching period to `max-age=300,private`
+    pagespeed ForbidFilters combine_javascript;
+
+    # Minifying inline JS is fine since no caching involved
+    pagespeed EnableFilters rewrite_javascript_inline;
+
+    # From original description in
+    # https://modpagespeed.com/doc/filter-css-rewrite
+    #
+    # The CSS parser cannot parse some CSS3 or proprietary CSS extensions.
+    # If fallback_rewrite_css_urls is not enabled,
+    # these CSS files will not be rewritten at all.
+    # If the fallback_rewrite_css_urls filter is enabled,
+    # a fallback method will attempt to rewrite the URLs in the CSS file,
+    # even if the CSS cannot be successfully parsed and minified.
+    #
+    pagespeed ForbidFilters fallback_rewrite_css_urls;
+
+    # Enable rewriting style attribute for image urls
+    #
+    # Disable to allow preloading via HTTP header
+    pagespeed ForbidFilters rewrite_style_attributes_with_url;
+
+    # Flatten @import in CSS files
+    #
+    pagespeed EnableFilters flatten_css_imports;
+
+    # Inline content of small CSS files into HTML
+    #
+    pagespeed EnableFilters inline_css;
+
+    # Inline content of small JS files into HTML
+    #
+    pagespeed EnableFilters inline_javascript;
+
+    # Move CSS tags above script tags
+    # Faster rendering
+    #
+    pagespeed EnableFilters move_css_above_scripts;
+
+    # Remove HTML comments
+    # Except Internet Explorer conditional comments
+    #
+    pagespeed EnableFilters remove_comments;
+
+    # 'Extend Cache' seeks to improve the cacheability of a web page's resources
+    # without compromising the ability of site owners to change the resources and
+    # have those changes propagate to users' browsers.
+    #
+    pagespeed EnableFilters extend_cache_images;
+    pagespeed EnableFilters extend_cache_css;
+    # Got issue with responding with correct encoding
+    pagespeed ForbidFilters extend_cache_scripts;
+
+    # Convert images into formats with better performance
+    #
+    pagespeed EnableFilters convert_jpeg_to_progressive;
+    pagespeed EnableFilters convert_jpeg_to_webp;
+    pagespeed EnableFilters convert_png_to_jpeg;
+    pagespeed EnableFilters convert_to_webp_animated;
+    pagespeed EnableFilters convert_to_webp_lossless;
+    pagespeed EnableFilters inline_images;
+    pagespeed EnableFilters inline_preview_images;
+    pagespeed EnableFilters resize_mobile_images;
+    pagespeed EnableFilters recompress_jpeg;
+    pagespeed EnableFilters recompress_png;
+    pagespeed EnableFilters recompress_webp;
+    pagespeed EnableFilters jpeg_subsampling;
+    pagespeed EnableFilters resize_images;
+    pagespeed EnableFilters strip_image_color_profile;
+    pagespeed EnableFilters strip_image_meta_data;
+
+    # Set s-maxage for unoptimized resources
+    # 86400s = 24 hours = 1 day
+    pagespeed InPlaceSMaxAgeSec 86400;
+
+    # Disable CSS combine since it rewrites protocol relative URLs to HTTP only
+    pagespeed ForbidFilters combine_css;
+
+    location /ngx_pagespeed_statistics { allow all; deny all; }
+    location /ngx_pagespeed_global_statistics { allow all; deny all; }
+    location ~ ^/pagespeed_admin { allow all; deny all; }
+    location ~ ^/pagespeed_global_admin { allow all; deny all; }
+
+    # === PageSpeed === #
+
+
+    # === Custom Error Pages === #
+    error_page 500 /error_pages/500.html;
+    error_page 502 503 504 =503 /error_pages/503.html;
+
+    location = /error_pages/500.html {
+      alias {{ container_error_page_dir_path }}/{{ error_page_for_500_file_name }};
+      internal;
+    }
+    location = /error_pages/503.html {
+      # Tell client to retry after 1 hour = 3600 seconds
+      # https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.37
+      add_header Retry-After 3600 always;
+      alias {{ container_error_page_dir_path }}/{{ error_page_for_503_file_name }};
+      internal;
+    }
+
+    # Respond code >= 300 = intercepted for `error_page`
+    proxy_intercept_errors on;
+    # === Custom Error Pages === #
+
+
+    # === Ping Pong === #
+    # For measuring delay of transmission between gateway Nginx & client
+    location = /ping {
+      pagespeed off;
+
+      return 204;
+    }
+    # === Ping Pong === #
+
+
+    # === User Info === #
+    location ~ ^/my_country_code {
+      pagespeed off;
+      default_type application/json;
+      charset utf-8;
+      return 200 '{"country_code":"$geoip2_data_country_code"}';
+    }
+    # === User Info === #
+
+
+    # Blog
+    ## Rewrite blog URL with uppercase locale to lowercase
+    location ~ ^/zh-TW/blog.*$ {
+        rewrite ^/zh-TW/([^.]*)$ /zh-tw/$1 permanent;
+    }
+    location ~ ^/zh-CN/blog.*$ {
+        rewrite ^/zh-CN/([^.]*)$ /zh-cn/$1 permanent;
+    }
+
+
+    {% for extra_location in mapping.extra_locations %}
+
+    location {{ extra_location.location }} {
+
+        {% if extra_location.location_handing_method == "proxy_pass" %}
+
+        # Try to avoid stale DNS answer
+        # http://stackoverflow.com/questions/17685674/nginx-proxy-pass-with-remote-addr
+        resolver            8.8.8.8 8.8.4.4 valid=300s;
+
+        proxy_pass {{ extra_location.proxy_pass | mandatory }};
+
+        proxy_redirect  http://$proxy_host/   /;
+        proxy_redirect  https://$proxy_host/  /;
+
+        # DO NOT set the host or strange redirect will occur
+        proxy_set_header        X-Scheme            $scheme;
+        proxy_set_header        X-Forwarded-Proto   $scheme;
+        proxy_set_header        X-Forwarded-For     $proxy_add_x_forwarded_for;
+
+        {% for http_header in extra_location.extra_headers_to_proxy %}
+
+        proxy_set_header {{ http_header.name }} {{ http_header.value }};
+
+        {% endfor %}
+
+        {% endif %}
+
+
+        {% if extra_location.location_handing_method == "redirect" %}
+
+        {{ extra_location.redirect_rule }}
+
+        {% endif %}
+
+
+        {# These headers are set regardless of `location_handing_method` #}
+        {% for http_header in extra_location.extra_headers_to_requester %}
+
+        add_header {{ http_header.name }} {{ http_header.value }};
+
+        {% endfor %}
+
+
+        {% if extra_location.custom_expiry_config_value %}
+
+        expires {{ extra_location.custom_expiry_config_value }};
+
+        {% endif %}
+    }
+
+    {% endfor %}
+
+
+    # pass requests for dynamic content to rails
+    {% if mapping.app_backend_enabled %}
+
+    location / {
+      {% if app_backend_enabled %}
+
+      ### case insensitive http user agent blocking ###
+      if ($http_user_agent ~* (scrapy) ) {
+        # Close connection without response
+        return 444;
+      }
+
+      # Try to use `app_preferred_internal_connection_host`, which is host specific and optional
+      # The value of `app_preferred_internal_connection_host` should contain
+      # something that causes less bandwidth usage
+      #
+      # Fallback to `ansible_host` which is required for using Ansible
+      proxy_pass      http://{{ upstream_name }};
+
+      proxy_set_header        Host              $host;
+      proxy_set_header        X-Real-IP         $remote_addr;
+      proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
+      proxy_set_header        X-Forwarded-Proto $scheme;
+      proxy_set_header        X-Forwarded-Port  $server_port;
+      proxy_set_header        X-GeoIP2-Country-Code $geoip2_data_country_code;
+
+      proxy_set_header        Early-Data        $ssl_early_data;
+
+      {% if (region | default('')) == "CN" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code CN;
+
+      {% elif (region | default('')) == "HK_B" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% elif (region | default('')) == "HK" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% elif (region | default('')) == "google_cloud_asia-east2-c" %}
+
+      proxy_set_header        X-Spacious-Gateway-Country-Code HK;
+
+      {% endif %}
+
+      # For tracking services like NewRelic & Scout
+      # No harm adding it
+      proxy_set_header        X-Request-Start "t=${msec}";
+
+      # Make app server use the same request ID
+      proxy_set_header X-Request-ID $request_id;
+
+      # Allow keep-alive connection with upstream server(s)
+      #
+      # See
+      # https://stackoverflow.com/questions/10395807/nginx-close-upstream-connection-after-request
+      # http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive
+      proxy_http_version        1.1;
+      proxy_set_header          Connection "";
+
+      # For security reason
+      # We DO NOT want to send the library version in header
+      proxy_hide_header X-Powered-By;
+
+
+      # Timing Tracking
+      add_header  X-Upstream-Connect-Time $upstream_connect_time;
+      add_header  X-Upstream-Header-Time  $upstream_header_time;
+
+
+      # Logging
+      {% if (nginx_force_enable_access_log | default() | bool) %}
+      access_log syslog:server=127.0.0.1 request_timing;
+      # Set internal header to enable access log in app server
+      proxy_set_header X-Spacious-App-Access-Log-Enabled 1;
+      {% else %}
+      access_log syslog:server=127.0.0.1 request_timing if=$access_log_enabled;
+      # Set internal header to enable access log in app server
+      proxy_set_header X-Spacious-App-Access-Log-Enabled $access_log_enabled;
+      {% endif %}
+
+
+      {% else %}
+
+      return 503;
+
+      {% endif %}
+    }
+
+    {% endif %}
+  }
+
+  {% endfor %}
+
+
+  # Prevent processing requests with undefined server names
+  # @see http://nginx.org/en/docs/http/request_processing.html
+  server {
+    listen        80 default_server;
+    listen        443 ssl http2 default_server;
+    server_name   "";
+
+    ssl_certificate      {{ container_ssl_certs_path }}/blackhole.pem;
+    ssl_certificate_key  {{ container_ssl_certs_path }}/blackhole.pem;
+
+    return        444;
+  }
+}

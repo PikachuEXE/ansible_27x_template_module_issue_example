@@ -1,0 +1,13 @@
+---
+
+- name: "Assures {{ host_config_path }} dir exists"
+  file:
+    path: "{{ host_config_path }}"
+    state: directory
+
+- name: Upload {{ config_file_names }}
+  template:
+    src: "nginx/{{ item }}.j2"
+    dest: "{{ host_config_path }}/{{ item }}"
+  with_items: "{{ config_file_names }}"
+

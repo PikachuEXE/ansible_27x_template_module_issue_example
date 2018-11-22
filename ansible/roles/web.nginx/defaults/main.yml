@@ -1,0 +1,260 @@
+---
+
+host_config_path:  "~/temp/ansible_27x_template_module_issue_example"
+config_file_names:
+- nginx.conf
+
+
+
+
+container_config_path:           "/etc/nginx"
+container_ssl_certs_path:   "{{ container_config_path }}/certs"
+
+container_sub_config_path:           "/etc/nginx/conf.d"
+sub_config_file_names:
+- mime.types
+
+container_geoip2_path:   "{{ container_config_path }}/geoip2"
+geoip2_country_db_file_name: "GeoLite2-Country.mmdb"
+
+container_error_page_dir_path:   "{{ container_config_path }}/error_pages"
+error_page_for_500_file_name: "500.html"
+error_page_for_503_file_name: "503.html"
+
+
+# What's the biggest size of all cache files for Nginx PageSpeed
+#
+# 52428800 KB = 50 GB
+gateway_nginx_pagespeed_file_cache_size_in_kilobyte: "52428800"
+# What's the biggest inode of all cache files for Nginx PageSpeed
+#
+# The maximum is 6553600 on 100GB disk
+# This can't let it go too high
+# 1966080 = 6553600 / 2
+gateway_nginx_pagespeed_file_cache_inode_limit: "3276800"
+# How often should the above limits be checked and start cleaning if exceeded
+# Dunno why they want config to be specified in `ms`
+# Anyone want to check the cache every 0.x second?
+#
+# 3600000ms = 3600s = 60m
+gateway_nginx_pagespeed_file_cache_clean_interval_ms: "3600000"
+
+container_nginx_pagespeed_file_cache_path: "/var/cache/ngx_pagespeed"
+
+
+nginx_proxy_temp_path: "/dev/shm/nginx_proxy_temp"
+
+
+nginx_worker_connections: 1024 # Optimize this later
+
+
+nginx_keepalive_timeout:   "75s" # Optimize this later
+
+nginx_types_hash_max_size: 2048
+
+nginx_force_enable_access_log: false
+
+
+loggly_customer_token:    "af533df2-8f8b-492d-a16e-16e703860d80"
+
+# Security
+## Read this first
+## https://wiki.mozilla.org/Security/Server_Side_TLS
+nginx_ssl_dhparam_file_name:  "dh4096.pem"
+nginx_ssl_dhparam_file_path:  "{{ container_ssl_certs_path }}/{{ nginx_ssl_dhparam_file_name }}"
+## Valid values can be listed by using the underlying OpenSSL
+## `openssl ecparam -list_curves`
+##
+## Backward compatibility must be considered when choosing the value
+## Default is `prime256v1`
+## See http://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_dhparam
+##
+## Performance also needs to be considered
+## See
+## - https://books.google.com.hk/books?id=fQOLBAAAQBAJ&printsec=frontcover
+## - https://tls.mbed.org/kb/cryptography/elliptic-curve-performance-nist-vs-brainpool
+nginx_ssl_ecdh_curve:         "prime256v1:secp521r1:brainpoolP512r1:brainpoolP384r1:secp384r1:brainpoolP256r1:secp256k1:sect571r1:sect571k1:sect409k1:sect409r1:sect283k1:sect283r1"
+
+
+app_backend_enabled: true
+
+
+ssl_cert_filename_to_server_name_mappings:
+- ssl_cert_filename: "star_spacious_hk.pem"
+  server_name: "www.spacious.hk"
+  app_backend_enabled: true
+  allow_blog_access: false
+  pagespeed_enabled: true
+  extra_locations:
+  - location: "~* ^/en/blog/wp-content/uploads/.+/.+/.+\\.(jpeg|gif|png|jpg)"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: true
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.hk"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "public"
+    custom_expiry_config_value: "7d"
+  - location: "~* ^/en/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: true
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.hk"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+  - location: "~* ^/zh-tw/blog/wp-content/uploads/.+/.+/.+\\.(jpeg|gif|png|jpg)"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: true
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.hk"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "public"
+    custom_expiry_config_value: "7d"
+  - location: "~* ^/zh-tw/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: true
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.hk"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+- ssl_cert_filename: "star_spacious_hk.pem"
+  server_name: "blog.spacious.hk"
+  app_backend_enabled: false
+  allow_blog_access: false
+  extra_locations:
+  - location: "/"
+    location_handing_method: "redirect"
+    redirect_rule: "return 301 https://www.spacious.hk/en/blog;"
+    enforce_https: true
+    extra_headers_to_requester: []
+    custom_expiry_config_value: false
+- ssl_cert_filename: "star_spacious_hk.pem"
+  server_name: "spacious.hk *.spacious.hk"
+  app_backend_enabled: true
+  allow_blog_access: false
+  extra_locations: []
+- ssl_cert_filename: "www_spacious_com_hk.pem"
+  server_name: "spacious.com.hk www.spacious.com.hk *.spacious.com.hk"
+  app_backend_enabled: true
+  allow_blog_access: false
+  extra_locations: []
+- ssl_cert_filename: "www_spacious_sg.pem"
+  server_name: "spacious.sg www.spacious.sg *.spacious.sg"
+  app_backend_enabled: true
+  allow_blog_access: false
+  pagespeed_enabled: true
+  extra_locations: []
+
+- ssl_cert_filename: "www_spacious_tw.pem"
+  server_name: "www.spacious.tw"
+  app_backend_enabled: true
+  allow_blog_access: false
+  pagespeed_enabled: true
+  extra_locations:
+  - location: "~* ^/en/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: true
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.tw"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+  - location: "~* ^/zh-tw/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://somewhere.cloudwaysapps.com"
+    enforce_https: false
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "www.spacious.tw"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+- ssl_cert_filename: "www_spacious_tw.pem"
+  server_name: "spacious.tw *.spacious.tw"
+  app_backend_enabled: true
+  allow_blog_access: false
+  extra_locations:
+  - location: "~* ^/en/blog"
+    location_handing_method: "redirect"
+    redirect_rule: "return 301 https://www.spacious.tw/en/blog;"
+    enforce_https: true
+    extra_headers_to_requester: []
+    custom_expiry_config_value: false
+  - location: "~* ^/zh-tw/blog"
+    location_handing_method: "redirect"
+    redirect_rule: "return 301 https://www.spacious.tw/zh-tw/blog;"
+    enforce_https: true
+    extra_headers_to_requester: []
+    custom_expiry_config_value: false
+
+- ssl_cert_filename: false
+  server_name: "spacious.cn www.spacious.cn *.spacious.cn"
+  app_backend_enabled: true
+  allow_blog_access: false
+  extra_locations: []
+
+- ssl_cert_filename: false
+  server_name: "www.qianjus.com"
+  app_backend_enabled: true
+  allow_blog_access: false
+  pagespeed_enabled: true
+  extra_locations:
+  - location: "~* ^/en/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://blog-en.qianjus.com"
+    enforce_https: false
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "blog-en.qianjus.com"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+  - location: "~* ^/zh-cn/blog"
+    location_handing_method: "proxy_pass"
+    proxy_pass: "http://blog-zh-cn.qianjus.com"
+    enforce_https: false
+    extra_headers_to_proxy:
+    - name:   "Host"
+      value:  "blog-zh-cn.qianjus.com"
+    extra_headers_to_requester:
+    - name:   "Cache-Control"
+      value:  "private"
+    custom_expiry_config_value: "5m"
+- ssl_cert_filename: false
+  server_name: "qianjus.com *.qianjus.com"
+  app_backend_enabled: true
+  allow_blog_access: false
+  extra_locations:
+  - location: "~* ^/en/blog"
+    location_handing_method: "redirect"
+    redirect_rule: "return 301 http://www.qianjus.com/en/blog;"
+    enforce_https: false
+    extra_headers_to_requester: []
+    custom_expiry_config_value: false
+  - location: "~* ^/zh-cn/blog"
+    location_handing_method: "redirect"
+    redirect_rule: "return 301 http://www.qianjus.com/zh-cn/blog;"
+    enforce_https: false
+    extra_headers_to_requester: []
+    custom_expiry_config_value: false
+
+
+web_load_balancer_docker_container_http_port: 61836
